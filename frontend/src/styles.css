@@ -124,6 +124,9 @@ h1 span, h2 span { color: var(--lime); }
 .queue-list { display: grid; gap: 9px; max-height: 450px; overflow: auto; padding: 1px 3px 1px 0; }
 .queue-card { border: 1px solid #46513a; border-radius: 3px; padding: 12px; background: rgba(11, 17, 20, .76); animation: rise-in .28s ease both; }
 .queue-approved { animation: approve-flash 1.1s ease both; }
+.queue-failed { border-color: rgba(255, 99, 99, .7); background: rgba(52, 19, 22, .34); }
+.queue-failed-label { color: var(--red); font-size: 8px; font-weight: 800; letter-spacing: .12em; }
+.queue-failure-detail { margin: 9px 0 0; border-left: 2px solid var(--red); padding: 7px 9px; background: rgba(255, 99, 99, .07); color: #ffc2c2; font-size: 10px; line-height: 1.55; overflow-wrap: anywhere; }
 .queue-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .queue-action { color: var(--lime); font: 700 17px var(--display); text-transform: uppercase; }
 .queue-target-count { color: #829087; font-size: 7px; font-weight: 700; letter-spacing: .1em; }

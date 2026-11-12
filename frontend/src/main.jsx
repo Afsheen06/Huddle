@@ -196,6 +196,9 @@ function App() {
   const overdueLabel = amountTotal(overdueInvoices, (invoice) => invoice.due_amount || invoice.effective_due_amount || invoice.amount)
   const playersPaid = board.filter((player) => player.status === 'paid').length
   const paidPercent = board.length ? Math.round((playersPaid / board.length) * 100) : 0
+  const pendingQueueItems = queue.filter((item) => item.status === 'pending')
+  const failedQueueItems = queue.filter((item) => item.status === 'failed')
+  const visibleQueueItems = [...pendingQueueItems, ...failedQueueItems]
   const collectedLabel = amountTotal(collectedInvoices, (invoice) => {
     const total = amountParts(invoice.amount)
     if (String(invoice.status || '').toUpperCase() === 'PARTIALLY_PAID') {
@@ -296,7 +299,10 @@ function App() {
         method: 'POST',
         ...(decision === 'reject' ? { body: JSON.stringify({}) } : {}),
       })
-      if (decision === 'approve' && result.status === 'failed') throw new Error(result.error || 'PayPal could not complete the approved action.')
+      if (decision === 'approve' && result.status === 'failed') {
+        await refreshData(true)
+        throw new Error(result.error || 'PayPal could not complete the approved action.')
+      }
       if (decision === 'approve') {
         setLastApproved(item.id)
         window.setTimeout(() => setLastApproved(''), 1200)
@@ -412,17 +418,17 @@ function App() {
           <section className="panel referee-panel" aria-labelledby="referee-title">
             <div className="panel-heading referee-heading">
               <div><span className="eyebrow">HUMAN-IN-THE-LOOP SAFETY</span><h2>THE <span>REFEREE</span></h2></div>
-              <span className="queue-count">{queue.filter((item) => item.status === 'pending').length} WAITING</span>
+              <span className="queue-count">{pendingQueueItems.length} WAITING</span>
             </div>
             <p className="panel-intro">Nothing reaches a parent until you say so. Review every action before it leaves the bench.</p>
-            {queue.some((item) => item.status === 'pending') && <button className="button approve-all" onClick={approveAll} disabled={busyQueueId === 'all'}>{busyQueueId === 'all' ? 'Approving…' : `Approve all ${queue.filter((item) => item.status === 'pending').length} pending`}</button>}
+            {pendingQueueItems.length > 0 && <button className="button approve-all" onClick={approveAll} disabled={busyQueueId === 'all'}>{busyQueueId === 'all' ? 'Approving…' : `Approve all ${pendingQueueItems.length} pending`}</button>}
             <div className="queue-list">
-              {loading ? <><Skeleton className="queue-skeleton" /><Skeleton className="queue-skeleton" /></> : queue.filter((item) => item.status === 'pending').length ? queue.filter((item) => item.status === 'pending').map((item) => <article className={`queue-card ${lastApproved === item.id ? 'queue-approved' : ''}`} key={item.id}>
-                <div className="queue-card-head"><span className="queue-action">{String(item.action_type).replaceAll('_', ' ')}</span><span className="queue-target-count">{item.target_invoice_ids?.length || 0} INVOICE{item.target_invoice_ids?.length === 1 ? '' : 'S'}</span></div>
+              {loading ? <><Skeleton className="queue-skeleton" /><Skeleton className="queue-skeleton" /></> : visibleQueueItems.length ? visibleQueueItems.map((item) => <article className={`queue-card ${item.status === 'failed' ? 'queue-failed' : lastApproved === item.id ? 'queue-approved' : ''}`} key={item.id}>
+                <div className="queue-card-head"><span className="queue-action">{String(item.action_type).replaceAll('_', ' ')}</span><span className={item.status === 'failed' ? 'queue-failed-label' : 'queue-target-count'}>{item.status === 'failed' ? 'FAILED' : `${item.target_invoice_ids?.length || 0} INVOICE${item.target_invoice_ids?.length === 1 ? '' : 'S'}`}</span></div>
                 <p>{item.summary}</p>
                 {item.reminder_message && <blockquote>{item.reminder_message}</blockquote>}
                 <div className="queue-targets">{(item.targets || []).map((target) => <span key={target.id}>{target.recipient_name || target.recipient_email || target.id} · {target.invoice_number || target.id}</span>)}</div>
-                <div className="queue-buttons"><button className="button button-approve" onClick={() => decideQueue(item, 'approve')} disabled={busyQueueId === item.id}>{busyQueueId === item.id ? 'Working…' : 'Approve'}</button><button className="button button-reject" onClick={() => decideQueue(item, 'reject')} disabled={busyQueueId === item.id}>Reject</button></div>
+                {item.status === 'failed' ? <p className="queue-failure-detail" role="alert">PayPal could not complete this action: {item.error || 'Please check the invoice in PayPal Sandbox.'}</p> : <div className="queue-buttons"><button className="button button-approve" onClick={() => decideQueue(item, 'approve')} disabled={busyQueueId === item.id}>{busyQueueId === item.id ? 'Working…' : 'Approve'}</button><button className="button button-reject" onClick={() => decideQueue(item, 'reject')} disabled={busyQueueId === item.id}>Reject</button></div>}
               </article>) : <div className="queue-empty"><span className="whistle">◉</span><strong>The Referee has nothing waiting.</strong><p>Proposed sends and reminders will appear here for your review.</p></div>}
             </div>
           </section>
