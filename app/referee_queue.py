@@ -11,6 +11,7 @@ from typing import Any
 from app import paypal_client
 from app.roster_service import get_roster, player_key
 from app.storage import read_json, write_json
+from app.settings import CURRENCY_SYMBOL
 
 
 _QUEUE_LOCK = threading.RLock()
@@ -31,6 +32,12 @@ def get_queue() -> list[dict[str, Any]]:
         return sorted(_queue_file(), key=lambda item: item.get("created_at", ""), reverse=True)
 
 
+def clear_queue() -> None:
+    """Clear local Referee proposals as part of an intentional demo reset."""
+    with _QUEUE_LOCK:
+        write_json("queue.json", [])
+
+
 def _brief(invoice: dict[str, Any]) -> dict[str, Any]:
     detail = invoice.get("detail") or {}
     billing = {}
@@ -39,6 +46,7 @@ def _brief(invoice: dict[str, Any]) -> dict[str, Any]:
         billing = recipients[0].get("billing_info") or {}
     amount = invoice.get("due_amount") or invoice.get("amount") or {}
     name = billing.get("name") or {}
+    linked = (read_json("invoice_map.json", {}) or {}).get(str(invoice.get("id") or ""), {})
     return {
         "id": invoice.get("id"),
         "invoice_number": detail.get("invoice_number"),
@@ -47,6 +55,8 @@ def _brief(invoice: dict[str, Any]) -> dict[str, Any]:
         "currency": amount.get("currency_code"),
         "recipient_name": name.get("full_name") or name.get("given_name"),
         "recipient_email": billing.get("email_address"),
+        "fee_amount_inr": linked.get("fee_amount_inr"),
+        "upi_link": linked.get("upi_link"),
     }
 
 
@@ -68,16 +78,27 @@ def _summary(action_type: str, briefs: list[dict[str, Any]], reminder_message: s
         total = sum((Decimal(str(item.get("amount") or "0")) for item in briefs), Decimal("0"))
         currencies = {item.get("currency") for item in briefs if item.get("currency")}
         currency = next(iter(currencies)) if len(currencies) == 1 else "mixed currencies"
-        return f"Send {len(briefs)} draft invoices totaling {total:.2f} {currency}."
+        rupees = sum(
+            Decimal(str(_fee_value(item.get("fee_amount_inr")) or 0))
+            for item in briefs
+        )
+        return f"Send {len(briefs)} PayPal Sandbox test invoices (USD test total {total:.2f} {currency}; club fees total {CURRENCY_SYMBOL}{rupees:.2f} INR)."
     item = briefs[0]
     label = item.get("invoice_number") or item["id"]
     recipient = item.get("recipient_name") or item.get("recipient_email") or "the listed customer"
     if action_type == "send_invoice":
-        return f"Send invoice {label} ({item.get('amount')} {item.get('currency')}) to {recipient}."
+        fee = _fee_value(item.get("fee_amount_inr"))
+        fee_label = f"; linked club fee {CURRENCY_SYMBOL}{fee} INR" if fee is not None else "; no INR roster fee is linked"
+        return f"Send invoice {label} (PayPal Sandbox test amount {item.get('amount')} {item.get('currency')}{fee_label}) to {recipient}."
     if action_type == "cancel_invoice":
         return f"Cancel sent invoice {label} for {recipient}; PayPal may notify the customer."
     note_preview = (reminder_message or "").replace("\n", " ").strip()
     return f"Email {recipient} a reminder for invoice {label}: {note_preview}"
+
+
+def _fee_value(value: Any) -> Any:
+    """Read INR fees from either current numeric or earlier object records."""
+    return value.get("value") if isinstance(value, dict) else value
 
 
 def propose_action(
@@ -204,25 +225,15 @@ def approve_all() -> dict[str, Any]:
     return {"approved_count": sum(item.get("status") == "approved" for item in results), "items": results}
 
 
-def _reminder_text(parent_name: str | None, days_overdue: int, label: str, amount: str, currency: str) -> str:
+def _reminder_text(parent_name: str | None, days_overdue: int, label: str, amount: str, upi_link: str) -> str:
     greeting = parent_name.strip() if parent_name else "there"
     if days_overdue < 3:
-        return (
-            f"Hi {greeting}, just a friendly reminder that invoice {label} for "
-            f"{amount} {currency} is still outstanding. Whenever you have a moment, "
-            "please take a look. Thank you!"
-        )
-    if days_overdue <= 10:
-        return (
-            f"Hello {greeting}, our records show invoice {label} for {amount} {currency} "
-            f"is {days_overdue} days overdue. Could you please arrange payment or let "
-            "us know if you have any questions? Thank you."
-        )
-    return (
-        f"Dear {greeting}, invoice {label} for {amount} {currency} remains unpaid and "
-        f"is {days_overdue} days overdue. Please arrange payment at your earliest "
-        "convenience, or contact us if there is an issue. Thank you."
-    )
+        message = f"Hi {greeting}, just a friendly reminder that the club fee for invoice {label} is {CURRENCY_SYMBOL}{amount} INR and is still outstanding. Whenever convenient, please pay using the UPI link below. Thank you!"
+    elif days_overdue <= 10:
+        message = f"Hello {greeting}, our records show the club fee for invoice {label} ({CURRENCY_SYMBOL}{amount} INR) is {days_overdue} days overdue. Could you please arrange payment using the UPI link below, or let us know if you have questions? Thank you."
+    else:
+        message = f"Dear {greeting}, the club fee for invoice {label} ({CURRENCY_SYMBOL}{amount} INR) remains unpaid and is {days_overdue} days overdue. Please arrange payment using the UPI link below at your earliest convenience, or contact us if there is an issue. Thank you."
+    return f"{message}\nUPI payment link: {upi_link}"
 
 
 def chase_overdue() -> dict[str, Any]:
@@ -248,6 +259,14 @@ def chase_overdue() -> dict[str, Any]:
 
         invoice_id = str(invoice.get("id") or "")
         linked = invoice_map.get(invoice_id) or {}
+        # Only propose parent-facing reminders for invoices linked to a known
+        # INR roster fee and payment link. Never treat USD Sandbox as rupees.
+        fee_amount = linked.get("fee_amount_inr")
+        fee_value = fee_amount.get("value") if isinstance(fee_amount, dict) else fee_amount
+        upi_link = linked.get("upi_link")
+        if not fee_value or not upi_link:
+            skipped.append({"invoice_id": invoice_id, "reason": "No linked INR roster fee and UPI link; no reminder was drafted."})
+            continue
         parent_name = linked.get("parent_name")
         if not parent_name:
             recipients = invoice.get("primary_recipients") or []
@@ -268,8 +287,7 @@ def chase_overdue() -> dict[str, Any]:
             due = None
         days_overdue = max(0, (today - due).days) if due else 0
         number = details.get("invoice_number") or invoice_id
-        currency = str(balance.get("currency_code") or "USD")
-        note = _reminder_text(parent_name, days_overdue, str(number), format(amount_value, "f"), currency)
+        note = _reminder_text(parent_name, days_overdue, str(number), str(fee_value), upi_link)
         try:
             queued.append(propose_action("send_reminder", [invoice_id], reminder_message=note))
         except Exception as exc:

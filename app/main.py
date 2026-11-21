@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 from app import agent, paypal_client, referee_queue, roster_service
 from app.storage import ensure_data_files
+from app.settings import CLUB_NAME, CLUB_UPI_ID, CURRENCY_SYMBOL, DEFAULT_CURRENCY, PAYPAL_TEST_CURRENCY, UPI_ID_IS_PLACEHOLDER
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
@@ -128,6 +129,10 @@ class RejectRequest(BaseModel):
     reason: str | None = None
 
 
+class MarkPaidRequest(BaseModel):
+    player_key: str = Field(min_length=1, max_length=500)
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -150,7 +155,7 @@ def chat(request: ChatRequest) -> dict:
 @app.get("/invoices")
 def invoices() -> dict:
     try:
-        return paypal_client.list_invoices()
+        return roster_service.list_linked_invoices()
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -158,7 +163,7 @@ def invoices() -> dict:
 @app.get("/summary")
 def summary() -> dict:
     try:
-        return paypal_client.get_summary()
+        return roster_service.get_fee_summary()
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -187,11 +192,42 @@ def get_roster() -> dict:
     return {"players": roster_service.get_roster()}
 
 
+@app.get("/config")
+def public_config() -> dict:
+    """Non-secret display settings needed by the browser."""
+    return {"currency_symbol": CURRENCY_SYMBOL, "default_currency": DEFAULT_CURRENCY,
+            "paypal_test_currency": PAYPAL_TEST_CURRENCY, "club_name": CLUB_NAME,
+            "upi_id": CLUB_UPI_ID, "upi_is_placeholder": UPI_ID_IS_PLACEHOLDER}
+
+
+@app.get("/roster/{player_key}/payment")
+def player_payment(player_key: str) -> dict:
+    try:
+        return roster_service.get_player_payment(player_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/roster/mark-paid")
+def mark_paid(request: MarkPaidRequest) -> dict:
+    try:
+        return roster_service.mark_player_paid(request.player_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.post("/demo/seed")
 def seed_demo() -> dict:
-    """Replace the local roster with fictional players that have no billing emails."""
+    """Replace the local roster with Indian demo players and fake emails."""
     result = roster_service.seed_demo_roster()
-    return {"saved_count": result["saved_count"], "message": "Demo roster loaded; all parent emails are blank."}
+    return {"saved_count": result["saved_count"], "message": "Indian demo roster loaded with fake example.com emails; replace them before PayPal Sandbox billing."}
+
+
+@app.post("/demo/reset")
+def reset_demo() -> dict:
+    """Clear Huddle's local demo records and restore the fictional sample team."""
+    referee_queue.clear_queue()
+    return roster_service.reset_demo_data()
 
 
 @app.get("/queue")

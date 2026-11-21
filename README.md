@@ -1,125 +1,159 @@
-# Huddle: the AI treasurer for sports clubs
+# Huddle — AI Treasurer for Indian Clubs and Academies
 
-Huddle is a small web app that helps a sports club treasurer keep a player roster, prepare PayPal Sandbox bills for parents, and see which invoices are paid or overdue. The React screen talks to a FastAPI service; the service uses Gemini to understand chat requests and PayPal Sandbox to manage invoices. Sending, reminding, or cancelling an invoice waits in a human-reviewed Referee queue.
+Huddle is an AI treasurer for Indian sports clubs and academies that collect monthly fees from parents. It keeps a player roster and fee totals in rupees, prepares UPI payment links and QR codes, and gives the treasurer one place to review collections and follow-ups. For the hackathon demo, Gemini helps understand requests and PayPal Sandbox demonstrates invoice workflows. PayPal's current published currency list does not include INR, so PayPal invoices use USD as **test amounts only**; those dollars are not rupee conversions and are not real club collections. [PayPal supported currency codes](https://developer.paypal.com/api/codes/currency/)
 
-## Live demo
+## Features
 
-**Frontend:** `https://YOUR-HUDDLE-FRONTEND.onrender.com`  
-**Backend health check:** `https://YOUR-HUDDLE-BACKEND.onrender.com/health`
+- Import a pasted roster, let Gemini parse it, review the extracted players, and save it.
+- Show the roster, monthly fees, manual collection totals, and invoice status on a responsive board.
+- Generate an INR UPI intent link and QR code for each player's fee.
+- Chat in everyday language to ask for fee summaries, prepare invoice drafts, and draft overdue reminders.
+- View PayPal Sandbox invoices separately from the rupee club fee.
+- Review sensitive PayPal actions in the Referee queue before anything is sent, reminded, or cancelled.
+- Load a fictional Indian demo team or reset Huddle's local demo state for a fresh judge run.
 
-Replace these placeholders with the addresses Render gives you after deployment.
+## How payments are represented
 
-## Run locally in 5 steps
+### UPI fees in India
 
-Use Windows PowerShell. You need Python 3.11 or newer and Node.js installed.
+The player roster and Huddle scoreboard use INR (₹). Clicking a player displays their fee, a UPI QR, and a `upi://pay` link using `CLUB_UPI_ID` and `CLUB_NAME`. The payer completes the payment in their UPI app. Huddle does not get an automatic bank or UPI confirmation. After checking their own payment records, a treasurer may click **Mark as paid (UPI)**. The board labels this as a manual record, not a verified transaction.
 
-### 1. Add your local settings
+The default UPI ID `yourclub@upi` is intentionally fake. Configure the club's actual UPI ID privately in the backend environment. Never put a real UPI ID in the repository.
 
-If you do not already have a `.env` file, copy the example:
+### PayPal Sandbox invoices
+
+Huddle calls PayPal's Invoicing REST API to create and manage mock invoices. The published supported-currency list currently omits INR, so Huddle keeps the club fee in INR but sends USD to PayPal Sandbox. The UI and invoice descriptions identify the USD value as a **Sandbox test amount only**; it is not converted from INR or evidence that the family paid the club. Sandbox invoices and UPI collections are separate demonstrations.
+
+## AI and safety
+
+Huddle uses Google's Gemini API through the official `google-genai` Python SDK. Gemini function calling can select backend tools such as reading the fee summary, listing invoices, or preparing draft invoices. Gemini structured output parses messy roster text into reviewable player fields. Its tone-aware chasing flow drafts friendly, polite-but-firm, or formal reminders based on how overdue a linked Sandbox invoice is; reminders include the rupee club fee and UPI link.
+
+Creating a draft is allowed directly. Sending an invoice, sending a reminder, or cancelling an invoice is a sensitive action: Huddle places it in the **Referee queue**. A human must approve it before the backend calls PayPal. Rejecting a proposal does not call PayPal. A PayPal Sandbox payment never counts as a manual UPI collection.
+
+## Known limitations
+
+- UPI links and QR codes only start a payment in the payer's UPI app. Huddle does not verify or receive payment notifications.
+- Manual **Mark as paid** entries rely on the treasurer checking an external bank/UPI record.
+- PayPal invoices are USD Sandbox test invoices because INR is absent from PayPal's published supported currency list. Sandbox invoices do not process real money.
+- Only the first three demo players use `TEST_CLIENT_EMAIL`; their address should be a Sandbox Personal email. Other demo parent emails use `example.com` placeholders and are skipped during bulk invoice creation.
+- The public demo has no user login. Anyone who can reach it may use public demo endpoints, including resetting local demo data. Do not use real family data or production payment credentials.
+- Runtime roster, invoice mapping, queue, and manual payment data live in local JSON files. Render Free storage is temporary and can reset after a restart or redeploy. PayPal Sandbox keeps its invoices separately.
+- Gemini can misunderstand a request. Review the generated roster, draft, and every Referee proposal before continuing.
+- The simple per-IP limiter on `/chat` and `/roster/parse` is in-memory and process-local, not production-grade abuse protection.
+
+## Run locally (Windows PowerShell)
+
+Use two PowerShell windows from the project folder. Install Python 3.11+ and Node.js first.
+
+### 1. Create the private backend settings file
 
 ```powershell
 Copy-Item .env.example .env
+notepad .env
 ```
 
-Open `.env` in a text editor and enter your **PayPal Sandbox** app details and Gemini API key. Keep `.env` private; never upload it to GitHub. The PayPal base URL for Sandbox is `https://api-m.sandbox.paypal.com`.
+If `.env` already exists, do not overwrite it. Add PayPal Sandbox and Gemini credentials. For a local UPI QR demo, you can leave the deliberately fake `CLUB_UPI_ID=yourclub@upi`; it will not collect money. Set `CLUB_NAME` to the demo club name.
 
-### 2. Install the Python packages
-
-Run these commands from the project folder:
+### 2. Install backend dependencies
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-If `.venv` already exists, you can skip the first command.
+If `.venv` already exists, skip its creation.
 
-### 3. Start the backend
-
-In PowerShell window 1, from the project folder:
+### 3. Start FastAPI (PowerShell window 1)
 
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 
-Leave this window open. The API is at `http://localhost:8000`; its health check is `http://localhost:8000/health`.
+Keep this window open. Check `http://localhost:8000/health`; it should return `{"status":"ok"}`.
 
-### 4. Install the frontend packages
-
-Open PowerShell window 2 and go to the frontend folder:
+### 4. Install frontend dependencies (PowerShell window 2)
 
 ```powershell
 cd frontend
+Copy-Item .env.example .env
 npm install
 ```
 
-### 5. Start the frontend
+If `frontend/.env` already exists, keep it. Its `VITE_API_URL` should be `http://localhost:8000`. Never put backend secrets in the frontend environment file.
 
-In the same second window:
+### 5. Start the Vite website
 
 ```powershell
 npm run dev
 ```
 
-Open the Vite address printed in PowerShell, usually `http://localhost:5173`. Keep both windows open while using Huddle. Press **Ctrl+C** in a window to stop that server.
+Open the local address printed in the terminal, usually `http://localhost:5173`. Both terminals must stay open. Use **Load demo roster** to seed players or **Reset demo** to clear Huddle's local queue, invoice links, and manual marks and reload the sample roster. Reset does not delete PayPal Sandbox invoices.
 
 ## Deploy on Render
 
-The root `render.yaml` defines two Render services: a Python web service for the backend and a static site for the frontend. Render runs the backend on its assigned `PORT`; the frontend gets the backend's public Render URL at build time. Render's Blueprint `sync: false` entries ask for secret values in the dashboard rather than storing them in this file.
+The root `render.yaml` Blueprint defines `huddle-backend` (FastAPI/Uvicorn) and `huddle-frontend` (Vite static site, published from `frontend/dist`).
 
-### Beginner deployment steps
+1. Push the project to GitHub. Do not commit `.env`, frontend secrets, virtual environments, or runtime JSON files.
+2. In Render, choose **New → Blueprint**, connect this repository, and deploy the Blueprint.
+3. In the backend service's **Environment** settings, provide your PayPal Sandbox and Gemini values. Keep secrets there only.
+4. Set `CORS_ORIGINS` to the exact deployed frontend origin, such as `https://your-huddle-frontend.onrender.com`.
+5. Set `CLUB_NAME` for the demo and set `TEST_CLIENT_EMAIL` to the Sandbox Personal email for the first three demo players. Remaining `example.com` placeholders are skipped by bulk billing. Keep the fake UPI ID for a QR-only demonstration, or configure the real club UPI ID privately if appropriate.
+6. Wait for both services to deploy. Open the backend `/health` URL, then open the frontend and click **Reset demo** to prepare a clean local Huddle demo.
 
-1. **Make sure private files stay private.** The root `.gitignore` excludes `.env`, frontend environment files, and runtime JSON data. `data/demo_roster.json` is the only data file allowed into Git. Never use `git add -f` on `.env` or runtime data.
-2. **Create a GitHub repository.** On GitHub, create an empty repository for Huddle. Do not upload `.env` or `data/roster.json`.
-3. **Upload the project from PowerShell.** Open PowerShell in the project folder and run the following. Replace the GitHub address with the one shown for your new repository. Check that `.env`, `.venv`, `frontend/node_modules`, and `data/roster.json` do **not** appear in `git status --short` before committing.
-
-   ```powershell
-   git init
-   git add .
-   git status --short
-   git commit -m "Prepare Huddle for Render"
-   git branch -M main
-   git remote add origin https://github.com/YOUR-USERNAME/YOUR-REPOSITORY.git
-   git push -u origin main
-   ```
-
-   If Git asks who you are, set your Git name and email with `git config --global user.name "Your Name"` and `git config --global user.email "you@example.com"`. Do not put passwords or API keys in these commands.
-4. **Create the Render Blueprint.** Sign in to Render, choose **New → Blueprint**, connect the GitHub repository, and deploy the Blueprint. Render reads `render.yaml` and creates both services.
-5. **Enter the requested settings in Render.** For `PAYPAL_CLIENT_ID`, `PAYPAL_SECRET`, `GEMINI_API_KEY`, and `GEMINI_MODEL`, enter the values for your own accounts. Set `PAYPAL_BASE_URL` to `https://api-m.sandbox.paypal.com` so the demo uses Sandbox. For the initial `CORS_ORIGINS` prompt, enter `http://localhost:5173` temporarily; you will replace it in the next step. Do not paste these values into GitHub, this README, or chat.
-6. **Wait for both deploys to finish.** Open each service in Render. Copy the frontend's `onrender.com` address. In the **backend** service, open **Environment**, change `CORS_ORIGINS` to that exact frontend address (no trailing slash), then save and deploy. This lets the browser frontend call your API.
-7. **Open the live frontend.** Visit the frontend address. `VITE_API_URL` is wired to the backend URL by the Blueprint. Check the backend by opening its address plus `/health`; it should return `{"status":"ok"}`.
-8. **Start a demo roster.** On the live page, click **Load demo roster** and confirm. It creates 12 fictional players with blank parent emails; this is safe for a fresh demo and avoids billing made-up email addresses.
-
-Render's free service filesystem is temporary. Huddle creates `data/roster.json`, `data/invoice_map.json`, and `data/queue.json` if they are missing, so a fresh service starts successfully. The files can still disappear after a restart or redeploy; the demo roster button can reload players. Use a database or persistent storage before relying on Huddle for real club records.
+Render Free uses temporary local files. Reset or redeploy may be needed to restore the fictional roster; PayPal Sandbox invoices are not cleared by Huddle's reset.
 
 ## Environment variables
 
-| Variable | Used by | What to enter |
+| Variable | Used by | Purpose |
 | --- | --- | --- |
-| `PAYPAL_CLIENT_ID` | Backend | PayPal Sandbox REST app client ID. Secret in Render. |
-| `PAYPAL_SECRET` | Backend | PayPal Sandbox REST app secret. Secret in Render. |
-| `PAYPAL_BASE_URL` | Backend | `https://api-m.sandbox.paypal.com` for Sandbox. |
-| `GEMINI_API_KEY` | Backend | Your Google AI Studio key. Secret in Render. |
-| `GEMINI_MODEL` | Backend | A Gemini model enabled for your key. |
-| `CORS_ORIGINS` | Backend | Comma-separated allowed website origins. Locally defaults to `http://localhost:5173,http://127.0.0.1:5173`; in Render set it to the frontend URL. |
-| `VITE_API_URL` | Frontend build | The backend URL. Render fills it from the backend service; locally defaults to `http://localhost:8000`. No API keys belong in frontend variables. |
+| `PAYPAL_CLIENT_ID` | Backend secret | PayPal Sandbox REST app client ID. |
+| `PAYPAL_SECRET` | Backend secret | PayPal Sandbox REST app secret. |
+| `PAYPAL_BASE_URL` | Backend | Sandbox API base URL: `https://api-m.sandbox.paypal.com`. |
+| `GEMINI_API_KEY` | Backend secret | Google Gemini API key. |
+| `GEMINI_MODEL` | Backend | Gemini model enabled for the API key. |
+| `TEST_CLIENT_EMAIL` | Backend, optional | Sandbox Personal email assigned to the first three demo players and used by `scripts/test_invoice.py`; all other demo addresses remain placeholders. |
+| `CORS_ORIGINS` | Backend | Comma-separated allowed frontend origins. |
+| `DEFAULT_CURRENCY` | Backend | Club fee currency; defaults to `INR`. |
+| `CURRENCY_SYMBOL` | Backend | Display symbol; defaults to `₹`. |
+| `CLUB_UPI_ID` | Backend | UPI payee ID for the link and QR; fake default is `yourclub@upi`. |
+| `CLUB_NAME` | Backend | Name shown in UPI payment instructions. |
+| `VITE_API_URL` | Frontend build | Public backend URL; contains no secrets. |
 
-## Short architecture explanation
+PayPal Sandbox invoice currency is deliberately fixed to USD and does not follow `DEFAULT_CURRENCY`.
 
-- **Frontend:** Vite serves the React dashboard. The browser sends HTTP requests to the backend URL in `VITE_API_URL`.
-- **Backend:** FastAPI provides `/chat`, `/roster`, `/board`, `/queue`, `/invoices`, `/summary`, and related endpoints. It binds to Render's `PORT` on `0.0.0.0`.
-- **PayPal Sandbox:** The backend creates and reads test invoices using credentials stored only in backend environment variables.
-- **Gemini:** The backend asks Gemini to understand natural-language requests and choose approved tools. The API key is never sent to the browser.
-- **Referee queue:** Sending, reminding, or cancelling is queued for human approval before the backend calls PayPal.
-- **Local JSON storage:** Roster, invoice links, and queue entries live under `data/`. This is convenient for a demo, but not durable storage on Render Free.
+## Architecture
 
-## How PayPal and AI are used
+1. The **React** page calls the **FastAPI** backend at `VITE_API_URL`.
+2. The backend reads private settings, stores demo data in JSON, creates UPI links/QR codes, and calls Gemini or PayPal when needed.
+3. **Gemini** interprets chat requests and roster text. The backend executes approved tool calls; Gemini never receives PayPal credentials.
+4. **PayPal Sandbox** stores mock USD invoices. The separate UPI flow gives parents a payment intent link/QR and does not report payments back to Huddle.
+5. The **Referee queue** holds send, reminder, and cancel requests until a human approves them.
 
-Gemini interprets what a treasurer types, such as “prepare drafts for U10” or “show my summary.” Python code decides which tool to run and makes the actual PayPal API request. Gemini never receives PayPal credentials. Creating invoices creates drafts; the Referee queue is the only path to sending invoices, reminders, or cancellations.
+## Routes for judges
 
-## Safety notes for a public demo
+| Method and route | Purpose |
+| --- | --- |
+| `GET /health` | Backend health check. |
+| `GET /config` | Public display settings; no secrets. |
+| `GET /summary`, `GET /board` | INR club fee totals and player statuses. |
+| `GET /roster` | Read roster. |
+| `POST /roster/parse`, `POST /roster/save` | Parse and save a reviewed roster. |
+| `GET /roster/{player_key}/payment` | Return a player's UPI link and QR. |
+| `POST /roster/mark-paid` | Manually mark a UPI fee as paid. |
+| `POST /demo/seed` | Load the fictional demo roster. |
+| `POST /demo/reset` | Clear local queue, invoice mapping and manual marks; reload demo roster. Does not delete PayPal invoices. |
+| `GET /invoices` | List PayPal Sandbox invoices. |
+| `POST /chat` | Chat with the Gemini agent. |
+| `GET /queue` | List Referee proposals. |
+| `POST /queue/{id}/approve`, `POST /queue/{id}/reject` | Approve and execute, or reject a proposal. |
 
-- Use **Sandbox** credentials only. Do not use a live PayPal client ID or secret.
-- `/chat` and `/roster/parse` are limited to 20 requests per IP per minute. Chat messages are limited to 2,000 characters; pasted rosters are limited to 20,000 characters. This in-memory limit is a basic demo guard, not a complete abuse-prevention system.
-- The API has no user login. Queue approval endpoints are publicly reachable on the demo, so someone who finds the site could approve a Sandbox action. Sandbox prevents real money movement, but public users could clutter the test account or use Gemini quota. Add authentication and stronger shared rate limiting before using real accounts or real data.
-- There is no Git history in the project folder yet, so existing history cannot be audited. The local `.env` contains your credentials and is ignored by `.gitignore`; it must stay out of GitHub. The source/example files use placeholders rather than credentials.
+## Credits
+
+- **Google Gemini API and `google-genai`** — chat function calling and structured roster parsing.
+- **PayPal Developer Invoicing REST API (Sandbox)** — mock USD invoice workflow.
+- **FastAPI**, **Uvicorn**, **Pydantic**, **Requests**, and **python-dotenv** — Python backend and configuration.
+- **React** and **Vite** — frontend framework and build tool.
+- **AG Grid Community** — filterable, sortable invoice ledger.
+- **qrcode** — UPI QR image generation.
+
+See [LICENSE](LICENSE) for the MIT license.

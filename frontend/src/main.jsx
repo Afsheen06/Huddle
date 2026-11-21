@@ -39,12 +39,15 @@ function amountParts(value, fallbackCurrency = 'USD') {
   return { value: Number(value || 0), currency: fallbackCurrency }
 }
 
-function money(value, currency = 'USD') {
+function money(value, currency = 'INR', currencySymbol = '₹') {
   const amount = amountParts(value, currency)
+  if (amount.currency === 'INR') {
+    return `${currencySymbol}${new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount.value)}`
+  }
   try {
     return new Intl.NumberFormat(undefined, { style: 'currency', currency: amount.currency, maximumFractionDigits: 2 }).format(amount.value)
   } catch {
-    return `${amount.value.toFixed(2)} ${amount.currency}`
+    return `${amount.currency === 'INR' ? '₹' : amount.currency + ' '} ${amount.value.toFixed(2)}`
   }
 }
 
@@ -55,7 +58,7 @@ function amountTotal(entries, getAmount) {
     totals[amount.currency] = (totals[amount.currency] || 0) + amount.value
   }
   const currencies = Object.keys(totals)
-  if (!currencies.length) return '$0'
+  if (!currencies.length) return '₹0'
   if (currencies.length === 1) return money({ value: totals[currencies[0]], currency_code: currencies[0] })
   return `${currencies.length} currencies`
 }
@@ -84,6 +87,14 @@ function StatusBadge({ value }) {
   return <span className={`status-badge status-${mapped}`}>{statusLabel(mapped)}</span>
 }
 
+function PaypalTestStatus({ value }) {
+  const normalized = String(value || '').toUpperCase()
+  const label = normalized === 'PAID' || normalized === 'PAID_EXTERNAL' || normalized === 'MARKED_AS_PAID'
+    ? 'PAID · TEST ONLY'
+    : normalized.replaceAll('_', ' ')
+  return <span className="status-badge status-sandbox">{label || 'UNKNOWN'}</span>
+}
+
 function Skeleton({ className = '' }) {
   return <div className={`skeleton ${className}`} aria-hidden="true" />
 }
@@ -98,6 +109,7 @@ function Stat({ label, value, foot, tone = '' }) {
 
 function App() {
   const [summary, setSummary] = useState(null)
+  const [config, setConfig] = useState(null)
   const [board, setBoard] = useState([])
   const [roster, setRoster] = useState([])
   const [invoices, setInvoices] = useState([])
@@ -107,6 +119,8 @@ function App() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [selectedPlayer, setSelectedPlayer] = useState(null)
+  const [selectedPayment, setSelectedPayment] = useState(null)
+  const [paymentBusy, setPaymentBusy] = useState(false)
   const [quickFilter, setQuickFilter] = useState('')
   const [chatInput, setChatInput] = useState('')
   const [chatHistory, setChatHistory] = useState([])
@@ -122,20 +136,23 @@ function App() {
   const [busyQueueId, setBusyQueueId] = useState('')
   const [lastApproved, setLastApproved] = useState('')
   const chatEndRef = useRef(null)
+  const feeMoney = useCallback((value) => money(value, config?.default_currency || 'INR', config?.currency_symbol || '₹'), [config])
 
   const refreshData = useCallback(async (quiet = false) => {
     if (quiet) setRefreshing(true)
     else setLoading(true)
     try {
-      const [nextSummary, nextBoard, nextInvoices, nextQueue, nextRoster] = await Promise.all([
-        api('/summary'), api('/board'), api('/invoices'), api('/queue'), api('/roster'),
+      const [nextSummary, nextBoard, nextInvoicesResult, nextQueue, nextRoster, nextConfig] = await Promise.all([
+        api('/summary'), api('/board'), api('/invoices').then((value) => ({ value })).catch((err) => ({ value: { items: [] }, error: err.message })), api('/queue'), api('/roster'), api('/config'),
       ])
+      const nextInvoices = nextInvoicesResult.value
       setSummary(nextSummary)
       setBoard(nextBoard.players || [])
       setInvoices(nextInvoices.items || [])
       setQueue(nextQueue.items || [])
       setRoster(nextRoster.players || [])
-      setError('')
+      setConfig(nextConfig)
+      setError(nextInvoicesResult.error ? `PayPal Sandbox invoices could not load: ${nextInvoicesResult.error}. The local INR board remains available.` : '')
     } catch (err) {
       setError(err.message || 'Could not reach Huddle. Is the backend running?')
     } finally {
@@ -161,7 +178,7 @@ function App() {
       const detail = invoice.detail || {}
       const due = detail.payment_term?.due_date || invoice.due_date || ''
       const value = invoice.due_amount || invoice.amount || {}
-      const linked = emailToPlayer.get(email.toLowerCase())
+      const linked = board.find((player) => player.player_name === invoice.player_name) || emailToPlayer.get(email.toLowerCase())
       const number = detail.invoice_number || invoice.id || '—'
       return {
         ...invoice,
@@ -171,50 +188,36 @@ function App() {
         due_date: due,
         amount_value: amountParts(value).value,
         amount_currency: amountParts(value).currency,
-        amount_display: money(value),
+        amount_display: feeMoney(invoice.club_fee_inr || linked?.fee_amount || 0),
+        paypal_test_display: `${money(value, 'USD')} · TEST ONLY`,
         roster_player: linked?.player_name || '',
-        roster_key: linked?.player_name || '',
+        roster_key: linked?.player_key || '',
       }
     })
-  }, [invoices, board])
+  }, [invoices, board, feeMoney])
 
   const filteredInvoices = useMemo(() => {
     if (!selectedPlayer) return invoicesByPlayer
-    return invoicesByPlayer.filter((invoice) => invoice.roster_key === selectedPlayer || board.find((p) => p.player_name === selectedPlayer)?.invoice_id === invoice.id)
+    return invoicesByPlayer.filter((invoice) => invoice.roster_key === selectedPlayer || board.find((p) => p.player_key === selectedPlayer)?.invoice_id === invoice.id)
   }, [invoicesByPlayer, selectedPlayer, board])
 
-  const collectedInvoices = invoices.filter((invoice) => ['PAID', 'PAID_EXTERNAL', 'MARKED_AS_PAID', 'PARTIALLY_PAID'].includes(String(invoice.status || '').toUpperCase()))
-  const overdueInvoices = invoices.filter((invoice) =>
-    ['SENT', 'UNPAID', 'PARTIALLY_PAID', 'PAYMENT_PENDING', 'SHARED'].includes(String(invoice.status || '').toUpperCase())
-    && isBeforeToday(invoice.detail?.payment_term?.due_date || invoice.due_date),
-  )
-  const outstandingLabel = summary?.outstanding_by_currency
-    ? (Object.keys(summary.outstanding_by_currency).length === 1
-      ? money({ value: Object.values(summary.outstanding_by_currency)[0], currency_code: Object.keys(summary.outstanding_by_currency)[0] })
-      : `${Object.keys(summary.outstanding_by_currency).length} currencies`)
-    : '$0'
-  const overdueLabel = amountTotal(overdueInvoices, (invoice) => invoice.due_amount || invoice.effective_due_amount || invoice.amount)
-  const playersPaid = board.filter((player) => player.status === 'paid').length
+  const outstandingLabel = feeMoney(summary?.outstanding_amount || 0)
+  const overdueLabel = feeMoney(summary?.overdue_amount || 0)
+  const playersPaid = summary?.paid_players || 0
   const paidPercent = board.length ? Math.round((playersPaid / board.length) * 100) : 0
   const pendingQueueItems = queue.filter((item) => item.status === 'pending')
   const failedQueueItems = queue.filter((item) => item.status === 'failed')
   const visibleQueueItems = [...pendingQueueItems, ...failedQueueItems]
-  const collectedLabel = amountTotal(collectedInvoices, (invoice) => {
-    const total = amountParts(invoice.amount)
-    if (String(invoice.status || '').toUpperCase() === 'PARTIALLY_PAID') {
-      const remaining = amountParts(invoice.due_amount || invoice.effective_due_amount || invoice.amount)
-      return { value: Math.max(0, total.value - remaining.value), currency_code: total.currency }
-    }
-    return invoice.amount
-  })
+  const collectedLabel = feeMoney(summary?.collected_amount || 0)
 
   const columnDefs = useMemo(() => [
     { field: 'invoice_number', headerName: 'INVOICE', minWidth: 115, flex: 0.75 },
     { field: 'client', headerName: 'CLIENT / PARENT', minWidth: 175, flex: 1.2 },
     { field: 'roster_player', headerName: 'PLAYER', minWidth: 135, flex: 0.9, valueFormatter: (params) => params.value || '—' },
-    { field: 'status', headerName: 'STATUS', minWidth: 130, flex: 0.8, cellRenderer: StatusBadge },
+    { field: 'status', headerName: 'PAYPAL TEST STATUS', minWidth: 150, flex: 0.9, cellRenderer: PaypalTestStatus },
     { field: 'due_date', headerName: 'DUE DATE', minWidth: 132, flex: 0.85, valueFormatter: (params) => dateLabel(params.value) },
-    { field: 'amount_display', headerName: 'AMOUNT DUE', minWidth: 135, flex: 0.8, cellClass: 'amount-cell' },
+    { field: 'amount_display', headerName: 'CLUB FEE (INR)', minWidth: 135, flex: 0.8, cellClass: 'amount-cell' },
+    { field: 'paypal_test_display', headerName: 'PAYPAL SANDBOX TEST (USD)', minWidth: 200, flex: 1.0 },
   ], [])
 
   const defaultColDef = useMemo(() => ({ sortable: true, filter: true, resizable: true, suppressHeaderMenuButton: true }), [])
@@ -278,16 +281,63 @@ function App() {
   }
 
   async function handleDemoSeed() {
-    const accepted = window.confirm('Load the fictional 12-player demo roster? This replaces the roster currently saved on this computer. Demo parent emails will be blank, so no invoices can be created for them by mistake.')
+    const accepted = window.confirm('Load the fictional 12-player Indian demo roster? This replaces the roster currently saved here. Emails are fake example.com addresses and must be replaced before Sandbox billing.')
     if (!accepted) return
     try {
       await api('/demo/seed', { method: 'POST' })
       setSelectedPlayer(null)
-      setNotice('Demo roster loaded. Add real Sandbox buyer emails before billing.')
+      setSelectedPayment(null)
+      setNotice('Demo roster loaded with ₹500 monthly fees. Replace fake emails before PayPal Sandbox billing.')
       await refreshData(true)
     } catch (err) {
       setError(`Could not load the demo roster: ${err.message}`)
     }
+  }
+
+  async function handleDemoReset() {
+    const accepted = window.confirm('Reset Huddle local demo data? This clears the Referee queue, invoice-to-player links, and manual UPI marks, then loads the fictional Indian roster. It does NOT delete invoices from PayPal Sandbox.')
+    if (!accepted) return
+    try {
+      await api('/demo/reset', { method: 'POST' })
+      setSelectedPlayer(null)
+      setSelectedPayment(null)
+      setLatestActions([])
+      setNotice('Huddle demo reset. Existing PayPal Sandbox invoices remain in PayPal.')
+      await refreshData(true)
+    } catch (err) {
+      setError(`Could not reset the demo: ${err.message}`)
+    }
+  }
+
+  async function showPlayerPayment(player) {
+    setSelectedPlayer((current) => current === player.player_key ? null : player.player_key)
+    if (selectedPlayer === player.player_key) { setSelectedPayment(null); return }
+    try {
+      const result = await api(`/roster/${encodeURIComponent(player.player_key)}/payment`)
+      setSelectedPayment(result)
+    } catch (err) {
+      setSelectedPayment(null)
+      setError(`Could not load UPI payment details: ${err.message}`)
+    }
+  }
+
+  async function markPaidManually(player) {
+    const ok = window.confirm(`Record ${player.player_name}'s ₹${Number(player.roster_amount || 0).toFixed(2)} as paid by UPI? This is only a manual record; Huddle cannot verify the bank payment.`)
+    if (!ok) return
+    setPaymentBusy(true)
+    try {
+      await api('/roster/mark-paid', { method: 'POST', body: JSON.stringify({ player_key: player.player_key }) })
+      setNotice('UPI payment recorded manually. It is not automatically verified.')
+      await refreshData(true)
+    } catch (err) {
+      setError(`Could not record payment: ${err.message}`)
+    } finally { setPaymentBusy(false) }
+  }
+
+  async function copyUpiLink() {
+    if (!selectedPayment?.upi_link) return
+    try { await navigator.clipboard.writeText(selectedPayment.upi_link); setNotice('UPI link copied.') }
+    catch { setError('Could not copy the UPI link. You can select and copy it from the payment panel.') }
   }
 
   async function decideQueue(item, decision) {
@@ -364,17 +414,17 @@ function App() {
         <section className="scoreboard section-block" aria-labelledby="scoreboard-title">
           <div className="section-heading scoreboard-heading">
             <div><span className="eyebrow">MATCH DAY // FINANCE</span><h1 id="scoreboard-title">CLUB <span>SCOREBOARD</span></h1></div>
-            <div className="board-meta"><span>{board.length ? `${board.length} PLAYERS ON ROSTER` : 'NO ROSTER LOADED'}</span><button className="text-button" onClick={handleDemoSeed}>Load demo roster <span>↗</span></button></div>
+            <div className="board-meta"><span>{board.length ? `${board.length} PLAYERS ON ROSTER` : 'NO ROSTER LOADED'}</span><div className="demo-actions"><button className="text-button" onClick={handleDemoSeed}>Load demo roster <span>↗</span></button><button className="text-button reset-demo-button" onClick={handleDemoReset}>Reset demo ↻</button></div></div>
           </div>
           <div className="score-grid">
             {loading ? <><Skeleton className="stat-skeleton" /><Skeleton className="stat-skeleton" /><Skeleton className="stat-skeleton" /><Skeleton className="stat-skeleton" /></> : <>
-              <Stat label="COLLECTED" value={collectedLabel} foot={`${summary?.paid_invoices || 0} paid invoice${summary?.paid_invoices === 1 ? '' : 's'}`} tone="stat-paid" />
-              <Stat label="OUTSTANDING" value={outstandingLabel} foot={`${summary?.unpaid_invoices || 0} sent & unpaid`} />
-              <Stat label="OVERDUE" value={overdueLabel} foot={`${summary?.overdue_invoices || 0} invoice${summary?.overdue_invoices === 1 ? '' : 's'} past due`} tone="stat-overdue" />
+              <Stat label="COLLECTED · MANUAL UPI" value={collectedLabel} foot={`${summary?.paid_players || 0} manually marked paid`} tone="stat-paid" />
+              <Stat label="OUTSTANDING ROSTER FEES" value={outstandingLabel} foot={`${summary?.unpaid_players || 0} players not marked paid`} />
+              <Stat label="OVERDUE" value={overdueLabel} foot={`${summary?.overdue_players || 0} linked invoices past due`} tone="stat-overdue" />
               <div className="stat stat-progress"><span className="stat-label">PLAYERS PAID</span><strong className="display-number">{playersPaid}<small>/{board.length}</small></strong><div className="progress-track"><span style={{ width: `${paidPercent}%` }} /></div><span className="stat-foot">{paidPercent}% of roster settled</span></div>
             </>}
           </div>
-          <div className="scoreboard-rule"><span>SEASON CONTROL</span><span>USD · SANDBOX ENVIRONMENT</span></div>
+          <div className="scoreboard-rule"><span>CLUB FEES DISPLAYED IN INR · COLLECTION IS MANUALLY RECORDED</span><span>PAYPAL AMOUNTS ARE USD SANDBOX TESTS ONLY</span></div>
         </section>
 
         <section className="section-block roster-section" aria-labelledby="roster-title">
@@ -383,13 +433,18 @@ function App() {
             <div className="roster-legend"><span><i className="legend-dot dot-paid" /> Paid</span><span><i className="legend-dot dot-due" /> Due</span><span><i className="legend-dot dot-late" /> Overdue</span><span><i className="legend-dot dot-draft" /> Draft</span></div>
           </div>
           {loading ? <div className="roster-grid">{Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="player-skeleton" />)}</div> : board.length ? <div className="roster-grid">
-            {board.map((player, index) => <button key={`${player.player_name}-${index}`} className={`player-tile tile-${player.status} ${selectedPlayer === player.player_name ? 'tile-selected' : ''}`} onClick={() => setSelectedPlayer((current) => current === player.player_name ? null : player.player_name)} title={selectedPlayer === player.player_name ? 'Clear player filter' : `Filter ledger to ${player.player_name}`}>
-              <div className="tile-top"><span className="jersey-number">{player.jersey_number || String(index + 1).padStart(2, '0')}</span><span className={`tile-status status-${player.status}`}>{player.status === 'overdue' ? `${player.days_overdue}D LATE` : statusLabel(player.status)}</span></div>
-              <strong className="player-name">{player.player_name}</strong>
-              <span className="player-fee">{money(player.amount || player.roster_amount || 0)} <small>{player.group || 'CLUB PLAYER'}</small></span>
-            </button>)}
+            {board.map((player, index) => <div key={`${player.player_key}-${index}`} className="player-tile-wrap">
+              <button className={`player-tile tile-${player.status} ${selectedPlayer === player.player_key ? 'tile-selected' : ''}`} onClick={() => showPlayerPayment(player)} title={`Select ${player.player_name} and filter ledger`}>
+                <div className="tile-top"><span className="jersey-number">{player.jersey_number || String(index + 1).padStart(2, '0')}</span><span className={`tile-status status-${player.status}`}>{player.manual_paid ? 'PAID · MANUAL' : player.payment_source === 'paypal_sandbox_test_paid' ? 'SANDBOX PAID · TEST' : player.status === 'overdue' ? `${player.days_overdue}D LATE` : statusLabel(player.status)}</span></div>
+                <strong className="player-name">{player.player_name}</strong>
+                <span className="player-fee">{feeMoney(player.fee_amount || player.roster_amount || 0)} <small>{player.group || 'CLUB PLAYER'}</small></span>
+                {player.payment_source === 'paypal_sandbox_test_paid' && <small className="test-warning">PayPal payment is USD Sandbox only</small>}
+              </button>
+              {!player.manual_paid && <button className="manual-paid-button" disabled={paymentBusy} onClick={() => markPaidManually(player)}>Mark as paid (UPI)</button>}
+            </div>)}
           </div> : <EmptyState title="No players on the roster" text="Import a roster or load the demo team to fill the board." />}
-          {selectedPlayer && <div className="filter-note">LEDGER FILTERED TO <strong>{selectedPlayer}</strong><button onClick={() => setSelectedPlayer(null)}>Clear filter ×</button></div>}
+          {selectedPlayer && <div className="filter-note">LEDGER FILTERED TO <strong>{board.find((p) => p.player_key === selectedPlayer)?.player_name}</strong><button onClick={() => { setSelectedPlayer(null); setSelectedPayment(null) }}>Clear filter ×</button></div>}
+          {selectedPayment && <aside className="upi-panel"><div><span className="eyebrow">UPI PAYMENT · INR</span><h3>Pay {feeMoney(selectedPayment.amount)} to {selectedPayment.club_name}</h3><p>Scan this QR with a UPI app. Payment completion is handled by the payer's UPI app; Huddle does not verify it automatically.</p>{selectedPayment.upi_is_placeholder && <p className="upi-placeholder-warning">Demo UPI ID is fake ({selectedPayment.upi_id}). Set CLUB_UPI_ID before collecting real payments.</p>}<code>{selectedPayment.upi_link}</code><button className="button button-quiet" onClick={copyUpiLink}>Copy UPI link</button></div><img src={selectedPayment.qr_code_data_url} alt={`UPI payment QR for ${selectedPayment.player_name}`} /></aside>}
         </section>
 
         <div className="main-columns">
@@ -447,7 +502,7 @@ function App() {
               <div ref={chatEndRef} />
             </div>
             <div className="prompt-chips">
-              {['Bill everyone $20 for November training, due in 10 days', "Who hasn't paid?", 'Chase the overdue ones', 'Send all the drafts'].map((prompt) => <button key={prompt} onClick={() => sendChat(prompt)} disabled={chatBusy}>{prompt}</button>)}
+              {['Bill everyone ₹500 for monthly fees, due in 10 days', "Who hasn't paid?", 'Chase the overdue ones', 'Send all the drafts'].map((prompt) => <button key={prompt} onClick={() => sendChat(prompt)} disabled={chatBusy}>{prompt}</button>)}
             </div>
             <form className="chat-composer" onSubmit={(event) => { event.preventDefault(); sendChat() }}>
               <textarea aria-label="Message Huddle" value={chatInput} onChange={(event) => setChatInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendChat() } }} placeholder="Ask Huddle about your club…" rows={1} />
@@ -475,7 +530,7 @@ function App() {
           <div className="modal-heading"><div><span className="eyebrow">TEAM SHEET</span><h2 id="import-title">IMPORT <span>ROSTER</span></h2><p>Paste a WhatsApp list or spreadsheet text. Huddle will organize it for you to review.</p></div><button className="modal-close" onClick={() => setModalOpen(false)} aria-label="Close import modal">×</button></div>
           {!parsedPlayers ? <>
             <label className="textarea-label" htmlFor="roster-paste">PASTE ROSTER TEXT</label>
-            <textarea id="roster-paste" className="roster-textarea" value={rosterText} onChange={(event) => setRosterText(event.target.value)} placeholder={'U10 Falcons\nAarav Shah - Parent: Riya Shah - 8 - 25 USD\nMia Patel, Kiran Patel, mia@example.com, jersey 12'} />
+            <textarea id="roster-paste" className="roster-textarea" value={rosterText} onChange={(event) => setRosterText(event.target.value)} placeholder={'U10 Falcons\nAarav Shah - Parent: Riya Shah - jersey 8 - ₹500 monthly\nMia Patel, Kiran Patel, parent@example.com, jersey 12'} />
             <div className="modal-actions"><span>Emails are never guessed. Missing ones will be flagged.</span><button className="button button-primary" onClick={handleParse} disabled={parseBusy || !rosterText.trim()}>{parseBusy ? 'Parsing…' : 'Parse roster →'}</button></div>
           </> : <>
             {parseWarnings.length > 0 && <div className="parse-warning">⚠ {parseWarnings.join(' ')}</div>}
@@ -485,7 +540,7 @@ function App() {
                 <td><input value={player.parent_name || ''} onChange={(event) => updateParsed(index, 'parent_name', event.target.value)} aria-label="Parent name" /></td>
                 <td><input className={!player.parent_email ? 'missing-email' : ''} value={player.parent_email || ''} onChange={(event) => updateParsed(index, 'parent_email', event.target.value)} aria-label="Parent email" placeholder="Missing — add email" />{!player.parent_email && <small className="missing-label">EMAIL NEEDED</small>}</td>
                 <td><input value={player.jersey_number || ''} onChange={(event) => updateParsed(index, 'jersey_number', event.target.value)} aria-label="Jersey number" /></td>
-                <td><input type="number" min="0" step="0.01" value={player.amount ?? ''} onChange={(event) => updateParsed(index, 'amount', event.target.value)} aria-label="Amount" /></td>
+                <td><input type="number" min="0" step="0.01" value={player.amount ?? ''} onChange={(event) => updateParsed(index, 'amount', event.target.value)} aria-label="Monthly fee in rupees" placeholder="INR ₹" /></td>
                 <td><input value={player.group || ''} onChange={(event) => updateParsed(index, 'group', event.target.value)} aria-label="Group" /></td>
                 <td><button className="remove-player" onClick={() => setParsedPlayers((players) => players.filter((_, i) => i !== index))} aria-label={`Remove ${player.player_name}`}>×</button></td>
               </tr>)}

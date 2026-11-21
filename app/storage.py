@@ -16,6 +16,7 @@ _storage_lock = threading.RLock()
 _RUNTIME_FILE_DEFAULTS = {
     "roster.json": [],
     "invoice_map.json": {},
+    "manual_payments.json": {},
     "queue.json": [],
 }
 

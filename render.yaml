@@ -17,8 +17,18 @@ services:
         sync: false
       - key: GEMINI_MODEL
         sync: false
+      - key: TEST_CLIENT_EMAIL
+        sync: false
       - key: CORS_ORIGINS
         sync: false
+      - key: DEFAULT_CURRENCY
+        value: INR
+      - key: CURRENCY_SYMBOL
+        value: ₹
+      - key: CLUB_UPI_ID
+        value: yourclub@upi
+      - key: CLUB_NAME
+        value: Your Club
 
   - type: web
     name: huddle-frontend
